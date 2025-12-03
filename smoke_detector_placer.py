@@ -576,13 +576,9 @@ def square_grid_points_in_poly(poly: Polygon, spacing: float):
 
 
 def compute_spacing(standard: str, custom_spacing: Optional[float]):
-    if custom_spacing and custom_spacing > 0:
-        return float(custom_spacing), "CUSTOM spacing provided by user."
-    if standard == "NFPA72":
-        return 9.1, "NFPA 72 smooth-ceiling nominal spacing (~30 ft)."
-    if standard == "EN54-14":
-        return 8.66, "EN 54-14 style conservative spacing targeting ≤7.5 m to nearest detector (hex grid recommended)."
-    return 9.1, "Default spacing used (NFPA-like)."
+    # USER REQUEST: ล็อค spacing ที่ 9.1 เมตรเสมอ
+    # Always return 9.1 meters spacing (locked)
+    return 9.1, "Locked spacing: 9.1 meters (user request: ระยะห่างระหว่างจุดปักล็อคที่ 9.1เมตร)"
 
 
 def compute_default_coverage_radius(standard: str, spacing_m: float) -> float:
@@ -598,6 +594,70 @@ def compute_default_coverage_radius(standard: str, spacing_m: float) -> float:
         ratio = 7.5 / 8.66
         return spacing_m * ratio
     return spacing_m * 0.5
+
+
+def remove_excessive_overlaps(points: List[Tuple[float, float]], coverage_radius: float, max_overlap_ratio: float = 0.5) -> List[Tuple[float, float]]:
+    """
+    Remove detectors where coverage circles overlap too much.
+    USER REQUEST: "ไม่จำเป็นต้องถี่ ถ้าดูแล้ววงมันซ้อนเยอะเกินจำเป็นก็ไม่ต้องปัก แต่ก็ยังต้องทำให้ครอบคลุม"
+    
+    Args:
+        points: List of (x, y) detector positions
+        coverage_radius: Radius of coverage circle in same units as points
+        max_overlap_ratio: Maximum allowed overlap ratio (0.0-1.0). 
+                          If overlap area > max_overlap_ratio * circle_area, remove the detector.
+                          Default 0.5 means if >50% of circle overlaps, remove it.
+    
+    Returns:
+        Filtered list of points with excessive overlaps removed
+    """
+    if not points or coverage_radius <= 0:
+        return points
+    
+    if len(points) <= 1:
+        return points
+    
+    circle_area = math.pi * (coverage_radius ** 2)
+    max_overlap_area = circle_area * max_overlap_ratio
+    
+    # Create coverage circles for all points
+    coverage_circles = [Point(x, y).buffer(coverage_radius, resolution=12) for (x, y) in points]
+    
+    # For each point, calculate how much its circle overlaps with others
+    points_to_keep = []
+    removed_count = 0
+    
+    for i, (x, y) in enumerate(points):
+        current_circle = coverage_circles[i]
+        total_overlap_area = 0.0
+        
+        # Check overlap with all other circles
+        for j, other_circle in enumerate(coverage_circles):
+            if i == j:
+                continue
+            
+            try:
+                # Calculate intersection area
+                if current_circle.intersects(other_circle):
+                    intersection = current_circle.intersection(other_circle)
+                    if intersection.area > 0:
+                        total_overlap_area += intersection.area
+            except Exception:
+                # If calculation fails, assume some overlap for safety
+                total_overlap_area += circle_area * 0.1
+        
+        # If total overlap exceeds threshold, remove this detector
+        if total_overlap_area > max_overlap_area:
+            removed_count += 1
+            overlap_percent = (total_overlap_area / circle_area) * 100
+            print(f"   🗑️  Removing detector at ({x:.2f}, {y:.2f}): overlap {overlap_percent:.1f}% > {max_overlap_ratio*100:.0f}% threshold")
+        else:
+            points_to_keep.append((x, y))
+    
+    if removed_count > 0:
+        print(f"   ✅ Removed {removed_count} detector(s) with excessive overlap (kept {len(points_to_keep)}/{len(points)})")
+    
+    return points_to_keep
 
 
 def fill_coverage_gaps(points_by_room: List[Dict], coverage_radius: float, target_polygon: Polygon) -> List[Tuple[float, float]]:
@@ -1231,8 +1291,8 @@ def extract_columns(doc, room_layers: List[str], min_area_m2: float = 0.01, max_
 
 
 def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_units: float, grid_type: str, building_bounds: Polygon = None, columns: Optional[List[Polygon]] = None):
-    # Default buffer distance: 2.0m radius
-    buffer_distance_default = 2.0 * (1000.0 if spacing_units > 100 else 1.0)
+    # Default buffer distance: 6.4m radius
+    buffer_distance_default = 6.4 * (1000.0 if spacing_units > 100 else 1.0)
     if room_poly.area <= 0:
         return [], buffer_distance_default
     inner = offset_interior(room_poly, margin_units)
@@ -1247,8 +1307,8 @@ def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_uni
         if inner.contains(c):
             pts = [(c.x, c.y)]
     
-    # Default buffer distance: 2.0m radius
-    buffer_distance_default = 2.0 * (1000.0 if spacing_units > 100 else 1.0)
+    # Default buffer distance: 6.4m radius
+    buffer_distance_default = 6.4 * (1000.0 if spacing_units > 100 else 1.0)
     
     # Filter points that are outside building bounds if provided
     if building_bounds and pts:
@@ -1270,13 +1330,13 @@ def place_detectors_in_room(room_poly: Polygon, spacing_units: float, margin_uni
     if columns is not None and len(columns) > 0 and pts:
         filtered_pts = []
         original_count = len(pts)
-        # Calculate buffer distance: USER REQUEST - "ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น"
-        # Use EXACTLY 2.0 meters radius for column exclusion zones
-        # This ensures detectors are placed OUTSIDE the 2m radius circle, not ON or near columns
+        # Calculate buffer distance: USER REQUEST - "ให้วาดวงกลมรัศมี 6.4เมตร แล้วห้ามปัก ในเขตนั้น"
+        # Use EXACTLY 6.4 meters radius for column exclusion zones
+        # This ensures detectors are placed OUTSIDE the 6.4m radius circle, not ON or near columns
         # Detect units from spacing_units magnitude: if > 100, likely mm; else meters
-        buffer_radius_m = 2.0  # EXACTLY 2.0 meters radius as requested by user
+        buffer_radius_m = 6.4  # EXACTLY 6.4 meters radius as requested by user
         if spacing_units > 100:
-            # Likely mm units, so 2.0m = 2000mm
+            # Likely mm units, so 6.4m = 6400mm
             buffer_distance = buffer_radius_m * 1000
         else:
             # Likely meters
@@ -1509,7 +1569,7 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
     # USER REQUEST: "ให้วาดวงกลมรัศมี 2เมตร" - Draw 2m radius circles around columns FIRST
     # Draw circles BEFORE filtering points so they're always visible
     if columns is not None and len(columns) > 0:
-        print(f"   📐 Drawing 2.0m radius circles around {len(columns)} columns...")
+        print(f"   📐 Drawing 6.4m radius circles around {len(columns)} columns...")
         # Create a layer for column buffer zones
         column_buffer_layer = "COLUMN_BUFFER_ZONES"
         try:
@@ -1524,12 +1584,12 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
                 print(f"   ⚠️  Warning: Could not create layer '{column_buffer_layer}'")
         
         # Calculate buffer distance for visualization
-        # USER REQUEST: "ให้วาดวงกลมรัศมี 2เมตร" - Use EXACTLY 2.0 meters radius
+        # USER REQUEST: "ให้วาดวงกลมรัศมี 6.4เมตร" - Use EXACTLY 6.4 meters radius
         if buffer_distance is not None and buffer_distance > 0:
             buffer_vis_units = buffer_distance
             print(f"   📏 Using buffer_distance from parameter: {buffer_vis_units} units")
         else:
-            # Fallback: use 2.0m radius
+            # Fallback: use 6.4m radius
             try:
                 bbox = msp.bbox()
                 max_dim = max(bbox.size.x, bbox.size.y)
@@ -1537,9 +1597,9 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
                 minx, miny, maxx, maxy = _bbox_fallback(msp)
                 max_dim = max(maxx - minx, maxy - miny)
             if max_dim > 2000:
-                buffer_vis_units = 2000  # 2m in mm
+                buffer_vis_units = 6400  # 6.4m in mm
             else:
-                buffer_vis_units = 2.0  # 2m
+                buffer_vis_units = 6.4  # 6.4m
             print(f"   📏 Using fallback buffer_distance: {buffer_vis_units} units (max_dim: {max_dim:.1f})")
         
         # Convert to meters for display
@@ -1551,10 +1611,10 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
             max_dim = max(maxx - minx, maxy - miny)
         buffer_vis_m = buffer_vis_units / (1000.0 if max_dim > 2000 else 1.0)
         
-        print(f"   ⚠️  User: 'ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น' - drawing circles on layer 'COLUMN_BUFFER_ZONES'")
+        print(f"   ⚠️  User: 'ให้วาดวงกลมรัศมี 6.4เมตร แล้วห้ามปัก ในเขตนั้น' - drawing circles on layer 'COLUMN_BUFFER_ZONES'")
         print(f"   📐 Buffer radius: {buffer_vis_units} units = {buffer_vis_m:.2f} m")
         
-        # Draw 2m radius circles around each column
+        # Draw 6.4m radius circles around each column
         circles_drawn = 0
         for col_idx, col_poly in enumerate(columns):
             try:
@@ -1562,7 +1622,7 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
                 centroid = col_poly.centroid
                 print(f"   🔵 Column #{col_idx+1}: centroid=({centroid.x:.2f}, {centroid.y:.2f}), radius={buffer_vis_units:.2f}")
                 
-                # Draw circle with EXACTLY 2.0m radius around column center
+                # Draw circle with EXACTLY 6.4m radius around column center
                 circle = msp.add_circle(center=(centroid.x, centroid.y), radius=buffer_vis_units,
                                       dxfattribs={"layer": column_buffer_layer})
                 circles_drawn += 1
@@ -1644,7 +1704,7 @@ def write_output_dxf(src_doc, out_path: Path, points_by_room: List[Dict], offset
         print(f"   ⚠️  WARNING: columns list is empty in write_output_dxf - cannot perform final safety check!")
         print(f"   ⚠️  This might be why detectors are still overlapping columns!")
         print(f"   ⚠️  No columns were detected - detectors may overlap columns!")
-    
+
     total_placed = 0
     for room in points_by_room:
         for (x, y) in room["points"]:
@@ -1865,10 +1925,13 @@ def main():
     spacing_units = spacing_m * scale
     margin_units = args.margin * scale
 
-    default_coverage_m = compute_default_coverage_radius(args.standard, spacing_m)
-    coverage_radius_m = default_coverage_m
+    # USER REQUEST: "วงกลมรัศมีจะล้อคที่ 6.4เมตร"
+    # Lock coverage radius at 6.4 meters
+    coverage_radius_m = 6.4
     if args.coverage_radius and args.coverage_radius > 0:
+        # Allow override if explicitly specified, but default to 6.4m
         coverage_radius_m = args.coverage_radius
+    print(f"📐 Coverage radius locked at: {coverage_radius_m:.2f} m (user request)")
 
     coverage_radius_units_effective = coverage_radius_m * scale if coverage_radius_m else None
     coverage_radius_units_draw = coverage_radius_units_effective if args.coverage_circles else None
@@ -1954,7 +2017,7 @@ def main():
     if columns and len(columns) > 0:
         print(f"   ✅ Using {len(columns)} detected columns for filtering")
         print(f"   ⚠️  CRITICAL: All detector points will be checked against these columns")
-        print(f"   ⚠️  User instruction: 'ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น' - using 2.0m radius exclusion zone")
+        print(f"   ⚠️  User instruction: 'ให้วาดวงกลมรัศมี 6.4เมตร แล้วห้ามปัก ในเขตนั้น' - using 6.4m radius exclusion zone")
     else:
         print(f"   ⚠️  WARNING: No columns detected - detectors may overlap columns!")
         print(f"   ⚠️  This might be why detectors are still overlapping columns!")
@@ -1972,6 +2035,15 @@ def main():
         pts, room_buffer_distance = place_detectors_in_room(poly, spacing_units, margin_units, args.grid, building_bounds, columns)
         if room_buffer_distance > buffer_distance_for_drawing:
             buffer_distance_for_drawing = room_buffer_distance
+        
+        # USER REQUEST: "ไม่จำเป็นต้องถี่ ถ้าดูแล้ววงมันซ้อนเยอะเกินจำเป็นก็ไม่ต้องปัก แต่ก็ยังต้องทำให้ครอบคลุม"
+        # Remove detectors with excessive overlap (overlap > 50% of coverage circle)
+        if len(pts) > 1 and coverage_radius_units_effective and coverage_radius_units_effective > 0:
+            original_count = len(pts)
+            pts = remove_excessive_overlaps(pts, coverage_radius_units_effective, max_overlap_ratio=0.5)
+            if len(pts) < original_count:
+                print(f"   🗑️  Room {i+1}: Removed {original_count - len(pts)} detector(s) with excessive overlap (kept {len(pts)})")
+        
         points_by_room.append({
             "index": i,
             "layer": layer,
@@ -1995,14 +2067,14 @@ def main():
     rooms_processed = sum(1 for r in points_by_room if r.get("layer") != "COVERAGE_FILL")
     
     # Calculate buffer distance for column filtering
-    # USER REQUEST: "ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น"
-    # Use EXACTLY 2.0 meters radius for column exclusion zones
-    buffer_radius_m = 2.0  # EXACTLY 2.0 meters radius as requested
+    # USER REQUEST: "ให้วาดวงกลมรัศมี 6.4เมตร แล้วห้ามปัก ในเขตนั้น"
+    # Use EXACTLY 6.4 meters radius for column exclusion zones
+    buffer_radius_m = 6.4  # EXACTLY 6.4 meters radius as requested
     if spacing_units > 100:
-        buffer_distance_for_columns = buffer_radius_m * 1000  # 2000mm
+        buffer_distance_for_columns = buffer_radius_m * 1000  # 6400mm
     else:
-        buffer_distance_for_columns = buffer_radius_m  # 2.0m
-    print(f"📐 Column exclusion zone: {buffer_radius_m:.2f} m radius circles (user: 'ให้วาดวงกลมรัศมี 2เมตร แล้วห้ามปัก ในเขตนั้น')")
+        buffer_distance_for_columns = buffer_radius_m  # 6.4m
+    print(f"📐 Column exclusion zone: {buffer_radius_m:.2f} m radius circles (user: 'ให้วาดวงกลมรัศมี 6.4เมตร แล้วห้ามปัก ในเขตนั้น')")
     
     # Write output DXF with offset
     print(f"💾 Saving DXF with detectors: {out_path}")

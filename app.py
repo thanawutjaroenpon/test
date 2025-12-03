@@ -124,9 +124,9 @@ def process_dxf_file(filepath, standard='NFPA72', grid_type='square', spacing='9
         if grid_type != 'square':
             cmd.extend(['--grid', grid_type])
         
-        # Add custom spacing if provided
-        if spacing and float(spacing) != 9.1:
-            cmd.extend(['--spacing', str(spacing)])
+        # USER REQUEST: ล็อค spacing ที่ 9.1 เมตรเสมอ
+        # Always use 9.1 meters spacing (locked)
+        cmd.extend(['--spacing', '9.1'])
         
         coverage_radius_value = None
         if coverage_radius:
